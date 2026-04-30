@@ -20,6 +20,12 @@
 #include "codegen.h"
 
 /* ------------------------------------------------------------------ */
+/*  Global label counter for unique label generation                   */
+/* ------------------------------------------------------------------ */
+
+static int label_counter = 0;
+
+/* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -35,9 +41,9 @@ static const char *arg_regs[] = { "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9" }
 /*  Expression emitter  (result in %rax)                               */
 /* ------------------------------------------------------------------ */
 
-static void emit_expr(Codegen *cg, Node *n);
+static void emit_expr(Codegen *cg, Node *n, SymTable *st);
 
-static void emit_call(Codegen *cg, Node *n)
+static void emit_call(Codegen *cg, Node *n, SymTable *st)
 {
     /* Collect up to MAX_REG_ARGS argument nodes, then evaluate left→right. */
     int   argc = 0;
@@ -46,7 +52,7 @@ static void emit_call(Codegen *cg, Node *n)
         argv_buf[argc++] = l->node;
 
     for (int i = 0; i < argc; i++) {
-        emit_expr(cg, argv_buf[i]);
+        emit_expr(cg, argv_buf[i], st);
         EMIT(cg, "movq %%rax, %s", arg_regs[i]);
     }
 
@@ -54,7 +60,7 @@ static void emit_call(Codegen *cg, Node *n)
     EMIT(cg, "call %s", n->call.name);
 }
 
-static void emit_expr(Codegen *cg, Node *n)
+static void emit_expr(Codegen *cg, Node *n, SymTable *st)
 {
     switch (n->kind) {
 
@@ -71,26 +77,34 @@ static void emit_expr(Codegen *cg, Node *n)
         break;
     }
 
-    case ND_IDENT:
-        /* TODO: look up stack offset in symbol table and emit movq. */
-        dief("variable reference '%s' not yet supported in codegen", n->ident.name);
+    case ND_IDENT: {
+        Symbol *sym = symtable_lookup(st, n->ident.name);
+        if (!sym) {
+            dief("undefined variable '%s'", n->ident.name);
+        }
+        EMIT(cg, "movq %d(%%rbp), %%rax", sym->stack_offset);
         break;
+    }
 
     case ND_CALL:
-        emit_call(cg, n);
+        emit_call(cg, n, st);
         break;
 
-    case ND_ASSIGN:
-        /* TODO: resolve lvalue address, then store rhs. */
-        emit_expr(cg, n->assign.rhs);
-        dief("assignment codegen not yet implemented");
+    case ND_ASSIGN: {
+        Symbol *sym = symtable_lookup(st, n->assign.lhs->ident.name);
+        if (!sym) {
+            dief("undefined variable '%s'", n->assign.lhs->ident.name);
+        }
+        emit_expr(cg, n->assign.rhs, st);
+        EMIT(cg, "movq %%rax, %d(%%rbp)", sym->stack_offset);
         break;
+    }
 
     case ND_BINOP: {
         /* Evaluate lhs → push; evaluate rhs → %rcx; operate on %rax/%rcx. */
-        emit_expr(cg, n->binop.lhs);
+        emit_expr(cg, n->binop.lhs, st);
         EMIT(cg, "pushq %%rax");
-        emit_expr(cg, n->binop.rhs);
+        emit_expr(cg, n->binop.rhs, st);
         EMIT(cg, "movq %%rax, %%rcx");
         EMIT(cg, "popq %%rax");
 
@@ -121,7 +135,7 @@ static void emit_expr(Codegen *cg, Node *n)
     }
 
     case ND_UNARY: {
-        emit_expr(cg, n->unary.operand);
+        emit_expr(cg, n->unary.operand, st);
         const char *op = n->unary.op;
         if      (!strcmp(op, "-")) EMIT(cg, "negq %%rax");
         else if (!strcmp(op, "!")) { EMIT(cg, "testq %%rax, %%rax"); EMIT(cg, "sete %%al"); EMIT(cg, "movzbq %%al, %%rax"); }
@@ -138,31 +152,31 @@ static void emit_expr(Codegen *cg, Node *n)
 /*  Statement emitter                                                   */
 /* ------------------------------------------------------------------ */
 
-static void emit_stmt(Codegen *cg, Node *n)
+static void emit_stmt(Codegen *cg, Node *n, SymTable *st)
 {
     switch (n->kind) {
 
     case ND_RETURN:
-        if (n->ret.expr) emit_expr(cg, n->ret.expr);
+        if (n->ret.expr) emit_expr(cg, n->ret.expr, st);
         EMIT(cg, "popq %%rbp");
         EMIT(cg, "ret");
         break;
 
     case ND_BLOCK:
         for (NodeList *l = n->block.stmts; l; l = l->next)
-            emit_stmt(cg, l->node);
+            emit_stmt(cg, l->node, st);
         break;
 
     case ND_IF: {
         int else_lbl = new_label(cg);
         int end_lbl  = new_label(cg);
-        emit_expr(cg, n->if_.cond);
+        emit_expr(cg, n->if_.cond, st);
         EMIT(cg, "testq %%rax, %%rax");
         EMIT(cg, "je .L%d", else_lbl);
-        emit_stmt(cg, n->if_.then_);
+        emit_stmt(cg, n->if_.then_, st);
         EMIT(cg, "jmp .L%d", end_lbl);
         LABEL(cg, else_lbl);
-        if (n->if_.else_) emit_stmt(cg, n->if_.else_);
+        if (n->if_.else_) emit_stmt(cg, n->if_.else_, st);
         LABEL(cg, end_lbl);
         break;
     }
@@ -171,10 +185,10 @@ static void emit_stmt(Codegen *cg, Node *n)
         int cond_lbl = new_label(cg);
         int end_lbl  = new_label(cg);
         LABEL(cg, cond_lbl);
-        emit_expr(cg, n->while_.cond);
+        emit_expr(cg, n->while_.cond, st);
         EMIT(cg, "testq %%rax, %%rax");
         EMIT(cg, "je .L%d", end_lbl);
-        emit_stmt(cg, n->while_.body);
+        emit_stmt(cg, n->while_.body, st);
         EMIT(cg, "jmp .L%d", cond_lbl);
         LABEL(cg, end_lbl);
         break;
@@ -183,15 +197,15 @@ static void emit_stmt(Codegen *cg, Node *n)
     case ND_FOR: {
         int cond_lbl = new_label(cg);
         int end_lbl  = new_label(cg);
-        if (n->for_.init) emit_stmt(cg, n->for_.init);
+        if (n->for_.init) emit_stmt(cg, n->for_.init, st);
         LABEL(cg, cond_lbl);
         if (n->for_.cond) {
-            emit_expr(cg, n->for_.cond);
+            emit_expr(cg, n->for_.cond, st);
             EMIT(cg, "testq %%rax, %%rax");
             EMIT(cg, "je .L%d", end_lbl);
         }
-        emit_stmt(cg, n->for_.body);
-        if (n->for_.step) emit_expr(cg, n->for_.step);
+        emit_stmt(cg, n->for_.body, st);
+        if (n->for_.step) emit_expr(cg, n->for_.step, st);
         EMIT(cg, "jmp .L%d", cond_lbl);
         LABEL(cg, end_lbl);
         break;
@@ -206,7 +220,7 @@ static void emit_stmt(Codegen *cg, Node *n)
     case ND_ASSIGN:
     case ND_BINOP:
     case ND_UNARY:
-        emit_expr(cg, n);
+        emit_expr(cg, n, st);
         break;
 
     default:
@@ -218,7 +232,7 @@ static void emit_stmt(Codegen *cg, Node *n)
 /*  Function and program                                                */
 /* ------------------------------------------------------------------ */
 
-static void emit_func(Codegen *cg, Node *fn)
+static void emit_func(Codegen *cg, Node *fn, SymTable *st)
 {
     fprintf(cg->out, ".globl %s\n", fn->func.name);
     fprintf(cg->out, ".type %s, @function\n", fn->func.name);
@@ -226,7 +240,7 @@ static void emit_func(Codegen *cg, Node *fn)
     EMIT(cg, "pushq %%rbp");
     EMIT(cg, "movq %%rsp, %%rbp");
 
-    emit_stmt(cg, fn->func.body);
+    emit_stmt(cg, fn->func.body, st);
 
     /* Implicit return 0 for functions that fall off the end. */
     EMIT(cg, "xorl %%eax, %%eax");
@@ -241,10 +255,188 @@ void codegen_init(Codegen *cg, FILE *out)
     cg->out = out;
 }
 
+/*
+ * codegen_expr — public API to evaluate a single expression node.
+ *
+ * Evaluates the given expression node using the provided symbol table
+ * for variable lookups. The result is left in %rax.
+ *
+ * Returns: nothing (result is in generated assembly, in %rax).
+ */
+void codegen_expr(Node *node, SymTable *st, FILE *out)
+{
+    if (!node || !st || !out) return;
+    
+    Codegen cg;
+    codegen_init(&cg, out);
+    emit_expr(&cg, node, st);
+}
+
+/*
+ * codegen_if — public API to emit an if statement.
+ *
+ * Evaluates condition into %rax, compares against 0, and branches:
+ *   - If condition is false (zero), jump to else-label (or end if no else)
+ *   - Emit then-block
+ *   - Jump to end-label
+ *   - Emit else-label and else-block if present
+ *   - Emit end-label
+ *
+ * Labels are generated with .Lif prefix for uniqueness.
+ */
+void codegen_if(Node *node, SymTable *st, FILE *out)
+{
+    if (!node || !st || !out) return;
+    if (node->kind != ND_IF) {
+        dief("codegen_if: expected ND_IF node");
+    }
+
+    int else_id = label_counter++;
+    int end_id  = label_counter++;
+
+    Codegen cg;
+    codegen_init(&cg, out);
+
+    /* Evaluate condition into %rax */
+    emit_expr(&cg, node->if_.cond, st);
+    
+    /* Compare %rax with 0 */
+    EMIT(&cg, "cmpq $0, %%rax");
+    
+    /* If false (zero), jump to else-label (or end if no else) */
+    if (node->if_.else_) {
+        EMIT(&cg, "je .Lif%d", else_id);
+    } else {
+        EMIT(&cg, "je .Lif%d", end_id);
+    }
+    
+    /* Emit then-block */
+    emit_stmt(&cg, node->if_.then_, st);
+    
+    /* Jump to end-label */
+    EMIT(&cg, "jmp .Lif%d", end_id);
+    
+    /* Emit else-label and else-block if present */
+    if (node->if_.else_) {
+        fprintf(cg.out, ".Lif%d:\n", else_id);
+        emit_stmt(&cg, node->if_.else_, st);
+    }
+    
+    /* Emit end-label */
+    fprintf(cg.out, ".Lif%d:\n", end_id);
+}
+
+/*
+ * codegen_while — public API to emit a while loop.
+ *
+ * Generates:
+ *   - Loop-start label
+ *   - Evaluate condition into %rax
+ *   - Compare against 0, je to loop-end
+ *   - Emit loop body
+ *   - Jump back to loop-start
+ *   - Emit loop-end label
+ *
+ * Labels are generated with .Lwhile prefix for uniqueness.
+ */
+void codegen_while(Node *node, SymTable *st, FILE *out)
+{
+    if (!node || !st || !out) return;
+    if (node->kind != ND_WHILE) {
+        dief("codegen_while: expected ND_WHILE node");
+    }
+
+    int start_id = label_counter++;
+    int end_id   = label_counter++;
+
+    Codegen cg;
+    codegen_init(&cg, out);
+
+    /* Emit loop-start label */
+    fprintf(cg.out, ".Lwhile%d:\n", start_id);
+    
+    /* Evaluate condition into %rax */
+    emit_expr(&cg, node->while_.cond, st);
+    
+    /* Compare %rax with 0 */
+    EMIT(&cg, "cmpq $0, %%rax");
+    
+    /* Jump to loop-end if condition is false (zero) */
+    EMIT(&cg, "je .Lwhile%d", end_id);
+    
+    /* Emit loop body */
+    emit_stmt(&cg, node->while_.body, st);
+    
+    /* Jump back to loop-start */
+    EMIT(&cg, "jmp .Lwhile%d", start_id);
+    
+    /* Emit loop-end label */
+    fprintf(cg.out, ".Lwhile%d:\n", end_id);
+}
+
+/*
+ * codegen_for — public API to emit a for loop.
+ *
+ * Generates:
+ *   - Emit init expression (if present)
+ *   - Loop-start label
+ *   - Evaluate condition (if present), je to loop-end if false
+ *   - Emit loop body
+ *   - Emit step expression (if present)
+ *   - Jump back to loop-start
+ *   - Emit loop-end label
+ *
+ * Labels are generated with .Lfor prefix for uniqueness.
+ */
+void codegen_for(Node *node, SymTable *st, FILE *out)
+{
+    if (!node || !st || !out) return;
+    if (node->kind != ND_FOR) {
+        dief("codegen_for: expected ND_FOR node");
+    }
+
+    int start_id = label_counter++;
+    int end_id   = label_counter++;
+
+    Codegen cg;
+    codegen_init(&cg, out);
+
+    /* Emit init expression if present */
+    if (node->for_.init) {
+        emit_stmt(&cg, node->for_.init, st);
+    }
+    
+    /* Emit loop-start label */
+    fprintf(cg.out, ".Lfor%d:\n", start_id);
+    
+    /* Evaluate condition if present and check for exit */
+    if (node->for_.cond) {
+        emit_expr(&cg, node->for_.cond, st);
+        EMIT(&cg, "cmpq $0, %%rax");
+        EMIT(&cg, "je .Lfor%d", end_id);
+    }
+    
+    /* Emit loop body */
+    emit_stmt(&cg, node->for_.body, st);
+    
+    /* Emit step expression if present */
+    if (node->for_.step) {
+        emit_expr(&cg, node->for_.step, st);
+    }
+    
+    /* Jump back to loop-start */
+    EMIT(&cg, "jmp .Lfor%d", start_id);
+    
+    /* Emit loop-end label */
+    fprintf(cg.out, ".Lfor%d:\n", end_id);
+}
+
 void codegen_emit(Codegen *cg, Node *root)
 {
     if (root->kind != ND_PROGRAM) die("codegen_emit: expected ND_PROGRAM");
     fprintf(cg->out, ".text\n");
+    /* TODO: integrate symbol table throughout codegen pipeline. */
+    SymTable *st = NULL;  /* placeholder; should be populated by semantic analysis */
     for (NodeList *l = root->program.funcs; l; l = l->next)
-        emit_func(cg, l->node);
+        emit_func(cg, l->node, st);
 }

@@ -13,6 +13,7 @@
  */
 
 #include "ast.h"
+#include "symtable.h"
 
 typedef struct {
     FILE *out;          /* output stream for assembly text              */
@@ -22,6 +23,10 @@ typedef struct {
 } Codegen;
 
 void codegen_init(Codegen *cg, FILE *out);
-void codegen_emit(Codegen *cg, Node *root);  /* root must be ND_PROGRAM */
+void codegen_emit(Codegen *cg, Node *root);           /* root must be ND_PROGRAM */
+void codegen_expr(Node *node, SymTable *st, FILE *out);  /* evaluate expr, result in %rax */
+void codegen_if(Node *node, SymTable *st, FILE *out);    /* emit if statement */
+void codegen_while(Node *node, SymTable *st, FILE *out); /* emit while loop */
+void codegen_for(Node *node, SymTable *st, FILE *out);   /* emit for loop */
 
 #endif /* CODEGEN_H */

@@ -11,8 +11,9 @@
  *   1. Read source file into memory.
  *   2. tokenize()       → flat Token array.
  *   3. parse()          → AST (Node tree).
- *   4. codegen_emit()   → x86-64 AT&T assembly in a temp file.
- *   5. gcc              → assemble + link into the final binary.
+ *   4. resolve()        → semantic analysis (scope + declaration checking).
+ *   5. codegen_emit()   → x86-64 AT&T assembly in a temp file.
+ *   6. gcc              → assemble + link into the final binary.
  */
 
 #include "compiler.h"
@@ -20,6 +21,7 @@
 #include "parser.h"
 #include "ast.h"
 #include "ast_print.h"
+#include "sema.h"
 #include "codegen.h"
 
 #include <unistd.h>
@@ -79,7 +81,12 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* 4. Codegen → temp .s file */
+    /* 4. Semantic analysis */
+    SymTable *st = symtable_new();
+    resolve(ast, st);
+    symtable_free(st);
+
+    /* 5. Codegen → temp .s file */
     char asm_path[] = "/tmp/mycc_XXXXXX.s";
     int  fd         = mkstemps(asm_path, 2);
     if (fd < 0) die("cannot create temp assembly file");
@@ -91,7 +98,7 @@ int main(int argc, char **argv)
     codegen_emit(&cg, ast);
     fclose(asm_out);
 
-    /* 5. Assemble + link */
+    /* 6. Assemble + link */
     char cmd[1024];
     snprintf(cmd, sizeof cmd, "gcc -o %s %s", out_path, asm_path);
     int rc = system(cmd);
