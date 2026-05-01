@@ -8,25 +8,35 @@
  * FILE*.  The generated file is then assembled and linked by gcc.
  *
  * Register allocation is deliberately simple: all temporaries go through
- * the stack (%rax for results, push/pop for sub-expressions), and
- * function arguments are placed in the SysV AMD64 integer registers.
+ * %rax (results) and push/pop (binary operator sub-expressions).
+ * Function arguments follow the SysV AMD64 ABI (%rdi/%rsi/%rdx/…).
  */
 
 #include "ast.h"
 #include "symtable.h"
 
 typedef struct {
-    FILE *out;          /* output stream for assembly text              */
-    int   label_cnt;    /* monotonic counter for unique jump labels     */
-    int   str_cnt;      /* counter for .rodata string literal labels    */
-    /* A symbol table (stack-slot map) will be added here. */
+    FILE     *out;        /* output stream for assembly text              */
+    int       label_cnt;  /* monotonic counter for unique jump labels     */
+    SymTable *st;         /* variable → stack-offset map, owned by Codegen */
 } Codegen;
 
+/* Initialise *cg and allocate its internal SymTable. */
 void codegen_init(Codegen *cg, FILE *out);
-void codegen_emit(Codegen *cg, Node *root);           /* root must be ND_PROGRAM */
-void codegen_expr(Node *node, SymTable *st, FILE *out);  /* evaluate expr, result in %rax */
-void codegen_if(Node *node, SymTable *st, FILE *out);    /* emit if statement */
-void codegen_while(Node *node, SymTable *st, FILE *out); /* emit while loop */
-void codegen_for(Node *node, SymTable *st, FILE *out);   /* emit for loop */
+
+/* Emit assembly for the entire ND_PROGRAM tree. */
+void codegen_emit(Codegen *cg, Node *root);
+
+/*
+ * Standalone entry points — useful for testing individual nodes in
+ * isolation.  They accept a caller-owned SymTable that must already
+ * have the relevant symbols defined.
+ */
+void codegen_expr(Node *node, SymTable *st, FILE *out);
+void codegen_if(Node *node, SymTable *st, FILE *out);
+void codegen_while(Node *node, SymTable *st, FILE *out);
+void codegen_for(Node *node, SymTable *st, FILE *out);
+void codegen_function(Node *node, FILE *out);   /* manages its own SymTable */
+void codegen_call(Node *node, SymTable *st, FILE *out);
 
 #endif /* CODEGEN_H */
