@@ -90,13 +90,45 @@ static void collect_strings(Node *n)
     }
 }
 
+/*
+ * fprint_asm_string — write `s` as a GAS-safe quoted string to `out`.
+ *
+ * The lexer decoded escape sequences (e.g. \n → 0x0A) when it built the
+ * token.  We must re-encode them here so that the .string directive does
+ * not contain raw control characters or unescaped quotes, which would
+ * confuse the assembler.
+ */
+static void fprint_asm_string(FILE *out, const char *s)
+{
+    fputc('"', out);
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        switch (c) {
+        case '"':  fputs("\\\"", out); break;
+        case '\\': fputs("\\\\", out); break;
+        case '\n': fputs("\\n",  out); break;
+        case '\t': fputs("\\t",  out); break;
+        case '\r': fputs("\\r",  out); break;
+        default:
+            if (c < 0x20 || c == 0x7f)
+                fprintf(out, "\\%03o", c);   /* octal escape for other controls */
+            else
+                fputc(c, out);
+            break;
+        }
+    }
+    fputc('"', out);
+}
+
 static void emit_rodata_section(FILE *out)
 {
     if (str_count == 0) return;
     fprintf(out, ".section .rodata\n");
-    for (int i = 0; i < str_count; i++)
-        fprintf(out, ".Lstr%d:\n\t.string \"%s\"\n",
-                str_table[i].id, str_table[i].value);
+    for (int i = 0; i < str_count; i++) {
+        fprintf(out, ".Lstr%d:\n\t.string ", str_table[i].id);
+        fprint_asm_string(out, str_table[i].value);
+        fputc('\n', out);
+    }
     /* Caller is responsible for switching back to .text. */
 }
 
