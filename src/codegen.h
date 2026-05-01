@@ -19,6 +19,7 @@ typedef struct {
     FILE     *out;        /* output stream for assembly text              */
     int       label_cnt;  /* monotonic counter for unique jump labels     */
     SymTable *st;         /* variable → stack-offset map, owned by Codegen */
+    int       push_depth; /* outstanding pushq ops — tracks %rsp offset for call alignment */
 } Codegen;
 
 /* Initialise *cg and allocate its internal SymTable. */

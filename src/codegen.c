@@ -194,8 +194,22 @@ static void emit_call(Codegen *cg, Node *n)
         emit_expr(cg, argv_buf[i]);
         EMIT(cg, "movq %%rax, %s", arg_regs[i]);
     }
+
+    /*
+     * SysV AMD64 requires %rsp to be 16-byte aligned at the point of call.
+     * The prologue leaves %rsp aligned, but each ND_BINOP pushq shifts it
+     * by 8.  If push_depth is odd we are 8 bytes off — pad with a dummy
+     * subq so the callee sees a properly aligned stack.
+     */
+    int needs_align = (cg->push_depth % 2 != 0);
+    if (needs_align)
+        EMIT(cg, "subq $8, %%rsp");
+
     EMIT(cg, "xorl %%eax, %%eax");   /* 0 XMM args — required for variadic calls */
     EMIT(cg, "call %s", n->call.name);
+
+    if (needs_align)
+        EMIT(cg, "addq $8, %%rsp");
 }
 
 static void emit_expr(Codegen *cg, Node *n)
@@ -242,9 +256,11 @@ static void emit_expr(Codegen *cg, Node *n)
          */
         emit_expr(cg, n->binop.lhs);
         EMIT(cg, "pushq %%rax");
+        cg->push_depth++;
         emit_expr(cg, n->binop.rhs);
         EMIT(cg, "movq %%rax, %%rcx");   /* rcx = rhs */
         EMIT(cg, "popq %%rax");          /* rax = lhs */
+        cg->push_depth--;
 
         const char *op = n->binop.op;
         if      (!strcmp(op, "+"))  EMIT(cg, "addq %%rcx, %%rax");
@@ -422,8 +438,9 @@ static void emit_stmt(Codegen *cg, Node *n)
 
 static void emit_func(Codegen *cg, Node *fn)
 {
-    /* Reset slot allocator — each function owns its frame from offset 0. */
+    /* Reset per-function state. */
     cg->st->stack_offset = 0;
+    cg->push_depth = 0;
 
     /*
      * Count every stack slot this function will need:
