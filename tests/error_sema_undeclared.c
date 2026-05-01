@@ -1,0 +1,4 @@
+int main() {
+    int x = y + 1;
+    return x;
+}

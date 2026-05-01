@@ -65,6 +65,7 @@ struct NodeList {
 
 struct Node {
     NodeKind kind;
+    int      line;
 
     union {
         /*
@@ -228,8 +229,8 @@ struct Node {
 /*  Node / NodeList API                                                 */
 /* ------------------------------------------------------------------ */
 
-/* Allocate a zeroed Node with the given kind. */
-Node     *node_new(NodeKind kind);
+/* Allocate a zeroed Node with the given kind and source line. */
+Node     *node_new(NodeKind kind, int line);
 
 /* Append `node` to the end of `list` and return the (possibly new) head. */
 NodeList *node_list_append(NodeList *list, Node *node);

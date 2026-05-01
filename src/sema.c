@@ -60,8 +60,11 @@ static void resolve_expr(Node *expr, SymTable *st)
 
     /* Variable reference — must be in scope. */
     case ND_IDENT:
-        if (!symtable_lookup(st, expr->ident.name))
-            dief("undefined variable '%s'", expr->ident.name);
+        if (!symtable_lookup(st, expr->ident.name)) {
+            fprintf(stderr, "error: line %d: '%s' used before declaration\n",
+                    expr->line, expr->ident.name);
+            exit(1);
+        }
         break;
 
     /* Assignment: resolve both sides (lhs is typically an ND_IDENT). */
@@ -127,9 +130,11 @@ static void resolve_stmt(Node *stmt, SymTable *st)
     case ND_VAR_DECL:
         if (stmt->var_decl.init)
             resolve_expr(stmt->var_decl.init, st);
-        if (!symtable_define(st, stmt->var_decl.name, stmt->var_decl.type_name))
-            dief("variable '%s' declared twice in the same scope",
-                 stmt->var_decl.name);
+        if (!symtable_define(st, stmt->var_decl.name, stmt->var_decl.type_name)) {
+            fprintf(stderr, "error: line %d: '%s' already declared in this scope\n",
+                    stmt->line, stmt->var_decl.name);
+            exit(1);
+        }
         break;
 
     /* return expr? */
@@ -222,9 +227,11 @@ void resolve(Node *program, SymTable *st)
         for (NodeList *pl = fn->func.params; pl; pl = pl->next) {
             Node *param = pl->node;  /* each param is an ND_VAR_DECL */
             if (!symtable_define(st, param->var_decl.name,
-                                     param->var_decl.type_name))
-                dief("duplicate parameter '%s' in function '%s'",
-                     param->var_decl.name, fn->func.name);
+                                     param->var_decl.type_name)) {
+                fprintf(stderr, "error: line %d: '%s' already declared in this scope (parameter in function '%s')\n",
+                        param->line, param->var_decl.name, fn->func.name);
+                exit(1);
+            }
         }
 
         /* Resolve the body.  It is always an ND_BLOCK, so resolve_stmt

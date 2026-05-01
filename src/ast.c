@@ -4,11 +4,12 @@
 
 #include "ast.h"
 
-Node *node_new(NodeKind kind)
+Node *node_new(NodeKind kind, int line)
 {
     Node *n = calloc(1, sizeof *n);
     if (!n) die("out of memory allocating Node");
     n->kind = kind;
+    n->line = line;
     return n;
 }
 

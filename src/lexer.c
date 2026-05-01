@@ -243,8 +243,8 @@ Token *tokenize(const char *src, int *out_count)
             ONE('=', TK_EQ)
             ONE('<', TK_LT)        ONE('>', TK_GT)
             default:
-                fprintf(stderr, "error: unexpected character '%c' (0x%02x) on line %d\n",
-                        c, (unsigned char)c, line);
+                fprintf(stderr, "error: line %d: unexpected character '%c'\n",
+                        line, c);
                 exit(1);
         }
 #undef ONE

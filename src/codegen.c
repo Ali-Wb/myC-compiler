@@ -186,9 +186,18 @@ static void emit_call(Codegen *cg, Node *n)
      * linear allocation strategy.
      */
     int   argc = 0;
+    for (NodeList *l = n->call.args; l; l = l->next)
+        argc++;
+    if (argc > MAX_REG_ARGS) {
+        fprintf(stderr, "error: function '%s' has more than %d arguments, not supported\n",
+                n->call.name, MAX_REG_ARGS);
+        exit(1);
+    }
+
     Node *argv_buf[MAX_REG_ARGS];
-    for (NodeList *l = n->call.args; l && argc < MAX_REG_ARGS; l = l->next)
-        argv_buf[argc++] = l->node;
+    int idx = 0;
+    for (NodeList *l = n->call.args; l; l = l->next)
+        argv_buf[idx++] = l->node;
 
     for (int i = 0; i < argc; i++) {
         emit_expr(cg, argv_buf[i]);

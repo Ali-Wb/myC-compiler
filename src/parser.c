@@ -83,9 +83,11 @@ static Token *consume(void)
 static Token *expect(TokenType type, const char *what)
 {
     Token *t = peek();
-    if (t->type != type)
-        dief("expected %s on line %d (got '%s')",
-             what, t->line, t->value ? t->value : "EOF");
+    if (t->type != type) {
+        fprintf(stderr, "error: line %d: expected %s but got '%s'\n",
+                t->line, what, t->value ? t->value : "EOF");
+        exit(1);
+    }
     return consume();
 }
 
@@ -104,9 +106,9 @@ static int match(TokenType type)
 /* ================================================================== */
 
 /* Allocate an ND_BINOP node; takes ownership of the heap string `op`. */
-static Node *make_binop(char *op, Node *lhs, Node *rhs)
+static Node *make_binop(char *op, Node *lhs, Node *rhs, int line)
 {
-    Node *n    = node_new(ND_BINOP);
+    Node *n    = node_new(ND_BINOP, line);
     n->binop.op  = op;
     n->binop.lhs = lhs;
     n->binop.rhs = rhs;
@@ -136,17 +138,18 @@ static Node *parse_statement(void);  /* used inside block / if / while / for */
 static Node *parse_primary(void)
 {
     Token *t = peek();
+    int line = t->line;
 
     if (t->type == TK_INT_LIT) {
         consume();
-        Node *n          = node_new(ND_INT_LIT);
+        Node *n          = node_new(ND_INT_LIT, line);
         n->int_lit.value = (int)strtol(t->value, NULL, 10);
         return n;
     }
 
     if (t->type == TK_STR_LIT) {
         consume();
-        Node *n          = node_new(ND_STR_LIT);
+        Node *n          = node_new(ND_STR_LIT, line);
         n->str_lit.value = strdup(t->value);
         return n;
     }
@@ -156,7 +159,7 @@ static Node *parse_primary(void)
         /* Function call: IDENT '(' arg* ')' */
         if (peek()->type == TK_LPAREN) {
             consume();  /* eat '(' */
-            Node *call      = node_new(ND_CALL);
+            Node *call      = node_new(ND_CALL, line);
             call->call.name = strdup(t->value);
             call->call.args = NULL;
             if (peek()->type != TK_RPAREN) {
@@ -169,7 +172,7 @@ static Node *parse_primary(void)
             return call;
         }
         /* Plain variable reference */
-        Node *n       = node_new(ND_IDENT);
+        Node *n       = node_new(ND_IDENT, line);
         n->ident.name = strdup(t->value);
         return n;
     }
@@ -195,9 +198,10 @@ static Node *parse_primary(void)
 static Node *parse_unary(void)
 {
     Token *t = peek();
+    int line = t->line;
     if (t->type == TK_MINUS || t->type == TK_BANG) {
         consume();
-        Node *n          = node_new(ND_UNARY);
+        Node *n          = node_new(ND_UNARY, line);
         n->unary.op      = strdup(t->value);
         n->unary.operand = parse_unary();   /* recurse: !!x, --x, etc. */
         return n;
@@ -212,8 +216,9 @@ static Node *parse_multiplicative(void)
     while (peek()->type == TK_STAR  ||
            peek()->type == TK_SLASH ||
            peek()->type == TK_PERCENT) {
-        char *op = strdup(consume()->value);
-        left = make_binop(op, left, parse_unary());
+        Token *op_tok = consume();
+        char *op = strdup(op_tok->value);
+        left = make_binop(op, left, parse_unary(), op_tok->line);
     }
     return left;
 }
@@ -223,8 +228,9 @@ static Node *parse_additive(void)
 {
     Node *left = parse_multiplicative();
     while (peek()->type == TK_PLUS || peek()->type == TK_MINUS) {
-        char *op = strdup(consume()->value);
-        left = make_binop(op, left, parse_multiplicative());
+        Token *op_tok = consume();
+        char *op = strdup(op_tok->value);
+        left = make_binop(op, left, parse_multiplicative(), op_tok->line);
     }
     return left;
 }
@@ -235,8 +241,9 @@ static Node *parse_comparison(void)
     Node *left = parse_additive();
     while (peek()->type == TK_LT || peek()->type == TK_GT ||
            peek()->type == TK_LE || peek()->type == TK_GE) {
-        char *op = strdup(consume()->value);
-        left = make_binop(op, left, parse_additive());
+        Token *op_tok = consume();
+        char *op = strdup(op_tok->value);
+        left = make_binop(op, left, parse_additive(), op_tok->line);
     }
     return left;
 }
@@ -246,8 +253,9 @@ static Node *parse_equality(void)
 {
     Node *left = parse_comparison();
     while (peek()->type == TK_EQEQ || peek()->type == TK_NEQ) {
-        char *op = strdup(consume()->value);
-        left = make_binop(op, left, parse_comparison());
+        Token *op_tok = consume();
+        char *op = strdup(op_tok->value);
+        left = make_binop(op, left, parse_comparison(), op_tok->line);
     }
     return left;
 }
@@ -257,8 +265,9 @@ static Node *parse_logical_and(void)
 {
     Node *left = parse_equality();
     while (peek()->type == TK_AND) {
-        char *op = strdup(consume()->value);
-        left = make_binop(op, left, parse_equality());
+        Token *op_tok = consume();
+        char *op = strdup(op_tok->value);
+        left = make_binop(op, left, parse_equality(), op_tok->line);
     }
     return left;
 }
@@ -268,8 +277,9 @@ static Node *parse_logical_or(void)
 {
     Node *left = parse_logical_and();
     while (peek()->type == TK_OR) {
-        char *op = strdup(consume()->value);
-        left = make_binop(op, left, parse_logical_and());
+        Token *op_tok = consume();
+        char *op = strdup(op_tok->value);
+        left = make_binop(op, left, parse_logical_and(), op_tok->line);
     }
     return left;
 }
@@ -299,8 +309,8 @@ static Node *parse_assign_expr(void)
 {
     Node *left = parse_expression();
     if (peek()->type == TK_EQ) {
-        consume();  /* eat '=' */
-        Node *n       = node_new(ND_ASSIGN);
+        Token *eq_tok = consume();  /* eat '=' */
+        Node *n       = node_new(ND_ASSIGN, eq_tok->line);
         n->assign.lhs = left;
         n->assign.rhs = parse_assign_expr();   /* right-associative */
         return n;
@@ -328,9 +338,9 @@ static int is_type_kw(TokenType t)
  */
 static Node *parse_block(void)
 {
-    expect(TK_LBRACE, "'{'");
+    Token *lbrace = expect(TK_LBRACE, "'{'");
 
-    Node *block        = node_new(ND_BLOCK);
+    Node *block        = node_new(ND_BLOCK, lbrace->line);
     block->block.stmts = NULL;
 
     while (peek()->type != TK_RBRACE && peek()->type != TK_EOF)
@@ -356,7 +366,7 @@ static Node *parse_var_decl(void)
     Token *type_tok = consume();                      /* int / char / void  */
     Token *name_tok = expect(TK_IDENT, "variable name");
 
-    Node *n               = node_new(ND_VAR_DECL);
+    Node *n               = node_new(ND_VAR_DECL, type_tok->line);
     n->var_decl.type_name = strdup(type_tok->value);
     n->var_decl.name      = strdup(name_tok->value);
     n->var_decl.init      = match(TK_EQ) ? parse_expression() : NULL;
@@ -377,9 +387,9 @@ static Node *parse_var_decl(void)
  */
 static Node *parse_return(void)
 {
-    expect(TK_RETURN, "'return'");
+    Token *ret_tok = expect(TK_RETURN, "'return'");
 
-    Node *n     = node_new(ND_RETURN);
+    Node *n     = node_new(ND_RETURN, ret_tok->line);
     n->ret.expr = (peek()->type == TK_SEMI) ? NULL : parse_assign_expr();
 
     expect(TK_SEMI, "';'");
@@ -398,10 +408,10 @@ static Node *parse_return(void)
  */
 static Node *parse_if(void)
 {
-    expect(TK_IF, "'if'");
+    Token *if_tok = expect(TK_IF, "'if'");
     expect(TK_LPAREN, "'('");
 
-    Node *n     = node_new(ND_IF);
+    Node *n     = node_new(ND_IF, if_tok->line);
     n->if_.cond = parse_expression();
 
     expect(TK_RPAREN, "')'");
@@ -423,10 +433,10 @@ static Node *parse_if(void)
  */
 static Node *parse_while(void)
 {
-    expect(TK_WHILE, "'while'");
+    Token *while_tok = expect(TK_WHILE, "'while'");
     expect(TK_LPAREN, "'('");
 
-    Node *n        = node_new(ND_WHILE);
+    Node *n        = node_new(ND_WHILE, while_tok->line);
     n->while_.cond = parse_expression();
 
     expect(TK_RPAREN, "')'");
@@ -452,10 +462,10 @@ static Node *parse_while(void)
  */
 static Node *parse_for(void)
 {
-    expect(TK_FOR, "'for'");
+    Token *for_tok = expect(TK_FOR, "'for'");
     expect(TK_LPAREN, "'('");
 
-    Node *n = node_new(ND_FOR);
+    Node *n = node_new(ND_FOR, for_tok->line);
 
     /* --- init clause --- */
     if (peek()->type == TK_SEMI) {
@@ -466,7 +476,7 @@ static Node *parse_for(void)
            we don't consume the ';' that belongs to the for header. */
         Token *type_tok = consume();
         Token *name_tok = expect(TK_IDENT, "variable name");
-        Node  *decl               = node_new(ND_VAR_DECL);
+        Node  *decl               = node_new(ND_VAR_DECL, type_tok->line);
         decl->var_decl.type_name  = strdup(type_tok->value);
         decl->var_decl.name       = strdup(name_tok->value);
         decl->var_decl.init       = match(TK_EQ) ? parse_expression() : NULL;
@@ -542,7 +552,7 @@ static Node *parse_function(void)
     Token *ret_tok  = consume();              /* return-type keyword    */
     Token *name_tok = expect(TK_IDENT, "function name");
 
-    Node *fn          = node_new(ND_FUNC);
+    Node *fn          = node_new(ND_FUNC, ret_tok->line);
     fn->func.ret_type = strdup(ret_tok->value);
     fn->func.name     = strdup(name_tok->value);
     fn->func.params   = NULL;
@@ -557,7 +567,7 @@ static Node *parse_function(void)
             Token *pty  = consume();
             Token *pnam = expect(TK_IDENT, "parameter name");
 
-            Node *param               = node_new(ND_VAR_DECL);
+            Node *param               = node_new(ND_VAR_DECL, pty->line);
             param->var_decl.type_name = strdup(pty->value);
             param->var_decl.name      = strdup(pnam->value);
             param->var_decl.init      = NULL;  /* params have no initialisers */
@@ -584,7 +594,7 @@ static Node *parse_function(void)
  */
 static Node *parse_program(void)
 {
-    Node *prog          = node_new(ND_PROGRAM);
+    Node *prog          = node_new(ND_PROGRAM, 0);
     prog->program.funcs = NULL;
 
     while (peek()->type != TK_EOF) {
