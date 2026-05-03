@@ -84,7 +84,8 @@ void print_ast(Node *node, int indent)
          *    PARAM …
          *    BLOCK … */
         pad(indent);
-        printf("FUNC [%s] -> %s\n", node->func.name, node->func.ret_type);
+        { char tb[64]; printf("FUNC [%s] -> %s\n", node->func.name,
+                              type_str(node->func.ret_type, tb, sizeof tb)); }
         if (node->func.params) {
             pad(indent + 1);
             printf("params:\n");
@@ -174,8 +175,9 @@ void print_ast(Node *node, int indent)
         /*  VAR_DECL [type name]
          *    <init-expr>    (only when there is an initialiser) */
         pad(indent);
-        printf("VAR_DECL [%s %s]\n",
-               node->var_decl.type_name, node->var_decl.name);
+        { char tb[64]; printf("VAR_DECL [%s %s]\n",
+                              type_str(node->var_decl.type, tb, sizeof tb),
+                              node->var_decl.name); }
         if (node->var_decl.init)
             print_ast(node->var_decl.init, indent + 1);
         break;
@@ -249,6 +251,18 @@ void print_ast(Node *node, int indent)
             }
         }
         printf("\"]\n");
+        break;
+
+    case ND_ADDR:
+        pad(indent);
+        printf("ADDR\n");
+        print_ast(node->addr.operand, indent + 1);
+        break;
+
+    case ND_DEREF:
+        pad(indent);
+        printf("DEREF\n");
+        print_ast(node->deref.operand, indent + 1);
         break;
 
     default:

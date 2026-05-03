@@ -15,6 +15,79 @@
 #include <assert.h>
 
 /* ------------------------------------------------------------------ */
+/*  Type system                                                         */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    TYPE_INT,
+    TYPE_CHAR,
+    TYPE_VOID,
+    TYPE_POINTER,
+} TypeKind;
+
+typedef struct Type {
+    TypeKind     kind;
+    struct Type *base;  /* non-NULL only for TYPE_POINTER */
+} Type;
+
+static inline Type *type_new(TypeKind kind, Type *base)
+{
+    Type *t = malloc(sizeof *t);
+    if (!t) { fprintf(stderr, "error: out of memory allocating Type\n"); exit(1); }
+    t->kind = kind;
+    t->base = base;
+    return t;
+}
+
+static inline Type *type_int(void)           { return type_new(TYPE_INT,     NULL); }
+static inline Type *type_char(void)          { return type_new(TYPE_CHAR,    NULL); }
+static inline Type *type_void(void)          { return type_new(TYPE_VOID,    NULL); }
+static inline Type *type_pointer(Type *base) { return type_new(TYPE_POINTER, base); }
+
+static inline void type_free(Type *t)
+{
+    if (!t) return;
+    type_free(t->base);
+    free(t);
+}
+
+static inline Type *type_copy(const Type *t)
+{
+    if (!t) return NULL;
+    return type_new(t->kind, type_copy(t->base));
+}
+
+/* Size in bytes of the pointed-at value; used for pointer arithmetic. */
+static inline int type_sizeof(const Type *t)
+{
+    if (!t) return 8;
+    switch (t->kind) {
+    case TYPE_CHAR:    return 1;
+    case TYPE_POINTER: return 8;
+    default:           return 8;  /* int, void */
+    }
+}
+
+/* Write a human-readable spelling of t into buf (e.g. "int", "char*", "int**"). */
+static inline const char *type_str(const Type *t, char *buf, int bufsz)
+{
+    if (!t) { snprintf(buf, (size_t)bufsz, "(null)"); return buf; }
+    if (t->kind == TYPE_POINTER) {
+        type_str(t->base, buf, bufsz);
+        int len = (int)strlen(buf);
+        if (len < bufsz - 1) { buf[len] = '*'; buf[len + 1] = '\0'; }
+    } else {
+        switch (t->kind) {
+        case TYPE_INT:  snprintf(buf, (size_t)bufsz, "int");  break;
+        case TYPE_CHAR: snprintf(buf, (size_t)bufsz, "char"); break;
+        case TYPE_VOID: snprintf(buf, (size_t)bufsz, "void"); break;
+        default:        snprintf(buf, (size_t)bufsz, "?");    break;
+        }
+    }
+    return buf;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Diagnostic macros                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -70,6 +143,7 @@ typedef enum {
     TK_AND,         /* &&                                             */
     TK_OR,          /* ||                                             */
     TK_BANG,        /* !                                              */
+    TK_AMP,         /* &   (address-of in unary context)              */
 
     /* --- Punctuation --- */
     TK_LPAREN,      /* (                                              */

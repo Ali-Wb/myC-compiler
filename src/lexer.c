@@ -240,6 +240,7 @@ Token *tokenize(const char *src, int *out_count)
             ONE('*', TK_STAR)      ONE('/', TK_SLASH)
             ONE('%', TK_PERCENT)
             ONE('!', TK_BANG)
+            ONE('&', TK_AMP)
             ONE('=', TK_EQ)
             ONE('<', TK_LT)        ONE('>', TK_GT)
             default:

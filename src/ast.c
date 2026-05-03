@@ -45,7 +45,7 @@ void node_free(Node *n)
 
     case ND_FUNC:
         free(n->func.name);
-        free(n->func.ret_type);
+        type_free(n->func.ret_type);
         for (NodeList *l = n->func.params; l; ) {
             NodeList *next = l->next;
             node_free(l->node);
@@ -75,7 +75,7 @@ void node_free(Node *n)
                       node_free(n->for_.step);
                       node_free(n->for_.body);                         break;
 
-    case ND_VAR_DECL: free(n->var_decl.type_name);
+    case ND_VAR_DECL: type_free(n->var_decl.type);
                       free(n->var_decl.name);
                       node_free(n->var_decl.init);                     break;
 
@@ -102,6 +102,8 @@ void node_free(Node *n)
     case ND_IDENT:    free(n->ident.name);                             break;
     case ND_STR_LIT:  free(n->str_lit.value);                         break;
     case ND_INT_LIT:                                                   break;
+    case ND_ADDR:     node_free(n->addr.operand);                      break;
+    case ND_DEREF:    node_free(n->deref.operand);                     break;
     }
 
     free(n);

@@ -41,6 +41,8 @@ typedef enum {
     ND_IDENT,       /* variable / parameter reference                  */
     ND_INT_LIT,     /* integer constant                                */
     ND_STR_LIT,     /* string constant                                 */
+    ND_ADDR,        /* &operand  — address-of                          */
+    ND_DEREF,       /* *operand  — pointer dereference                 */
 } NodeKind;
 
 /* ------------------------------------------------------------------ */
@@ -85,7 +87,7 @@ struct Node {
          */
         struct {
             char     *name;
-            char     *ret_type;
+            Type     *ret_type;  /* owned by this node */
             NodeList *params;
             Node     *body;
         } func;
@@ -144,12 +146,12 @@ struct Node {
 
         /*
          * ND_VAR_DECL
-         *   type_name — type spelling, e.g. "int", "char*" (heap-allocated).
+         *   type      — declared type (owned by this node).
          *   name      — variable name (heap-allocated).
          *   init      — initialiser expression, or NULL.
          */
         struct {
-            char *type_name;
+            Type *type;   /* declared type, owned by this node         */
             char *name;
             Node *init;
         } var_decl;
@@ -222,6 +224,18 @@ struct Node {
         struct {
             char *value;
         } str_lit;
+
+        /*
+         * ND_ADDR: &operand
+         *   operand — the lvalue whose address is taken.
+         */
+        struct { Node *operand; } addr;
+
+        /*
+         * ND_DEREF: *operand
+         *   operand — the pointer expression being dereferenced.
+         */
+        struct { Node *operand; } deref;
     };
 };
 

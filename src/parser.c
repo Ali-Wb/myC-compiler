@@ -7,6 +7,8 @@
  *   function      ::= type IDENT '(' params ')' block
  *   params        ::= (type IDENT (',' type IDENT)*)?
  *
+ *   type          ::= ('int' | 'char' | 'void') '*'*
+ *
  *   block         ::= '{' statement* '}'
  *   statement     ::= var_decl
  *                   | return_stmt
@@ -33,7 +35,10 @@
  *   comparison    ::= additive     (('<'|'>'|'<='|'>=') additive)*
  *   additive      ::= multiplicative (('+' | '-') multiplicative)*
  *   multiplicative::= unary        (('*'|'/'|'%') unary)*
- *   unary         ::= ('-'|'!') unary | primary
+ *   unary         ::= ('-'|'!') unary
+ *                   | '&' unary        (address-of → ND_ADDR)
+ *                   | '*' unary        (dereference → ND_DEREF)
+ *                   | primary
  *   primary       ::= INT_LIT | STR_LIT
  *                   | IDENT '(' args ')'
  *                   | IDENT
@@ -123,6 +128,50 @@ Node *parse_expression(void);        /* used inside parse_primary     */
 static Node *parse_statement(void);  /* used inside block / if / while / for */
 
 /* ================================================================== */
+/*  Type parser                                                        */
+/* ================================================================== */
+
+/* Predicate: is the current token a type keyword? */
+static int is_type_kw(TokenType t)
+{
+    return t == TK_INT || t == TK_CHAR || t == TK_VOID;
+}
+
+/*
+ * parse_type — parse a complete type specifier, including pointer stars.
+ *
+ *   type ::= ('int' | 'char' | 'void') '*'*
+ *
+ * Returns a heap-allocated Type chain.  The caller owns it.
+ * Examples:
+ *   int     → TYPE_INT
+ *   int *   → TYPE_POINTER { base=TYPE_INT }
+ *   int **  → TYPE_POINTER { base=TYPE_POINTER { base=TYPE_INT } }
+ */
+static Type *parse_type(void)
+{
+    Token *t = peek();
+    if (!is_type_kw(t->type))
+        dief("line %d: expected a type (int, char, void) but got '%s'",
+             t->line, t->value ? t->value : "EOF");
+    consume();
+
+    Type *base;
+    switch (t->type) {
+    case TK_INT:  base = type_int();  break;
+    case TK_CHAR: base = type_char(); break;
+    case TK_VOID: base = type_void(); break;
+    default: base = type_int(); break;  /* unreachable */
+    }
+
+    while (peek()->type == TK_STAR) {
+        consume();
+        base = type_pointer(base);
+    }
+    return base;
+}
+
+/* ================================================================== */
 /*  Expression layer                                                   */
 /* ================================================================== */
 
@@ -189,23 +238,44 @@ static Node *parse_primary(void)
 }
 
 /*
- * parse_unary — prefix - and ! operators, right-recursive.
+ * parse_unary — prefix operators, right-recursive.
  *
  *   '-' unary  →  ND_UNARY { op="-", operand }
  *   '!' unary  →  ND_UNARY { op="!", operand }
+ *   '&' unary  →  ND_ADDR  { operand }          (address-of)
+ *   '*' unary  →  ND_DEREF { operand }          (dereference)
  *   otherwise  →  parse_primary()
+ *
+ * Note: TK_STAR as a unary prefix is always dereference.  As an infix
+ * operator it is handled by parse_multiplicative().
  */
 static Node *parse_unary(void)
 {
     Token *t = peek();
     int line = t->line;
+
     if (t->type == TK_MINUS || t->type == TK_BANG) {
         consume();
         Node *n          = node_new(ND_UNARY, line);
         n->unary.op      = strdup(t->value);
-        n->unary.operand = parse_unary();   /* recurse: !!x, --x, etc. */
+        n->unary.operand = parse_unary();
         return n;
     }
+
+    if (t->type == TK_AMP) {
+        consume();
+        Node *n         = node_new(ND_ADDR, line);
+        n->addr.operand = parse_unary();
+        return n;
+    }
+
+    if (t->type == TK_STAR) {
+        consume();
+        Node *n          = node_new(ND_DEREF, line);
+        n->deref.operand = parse_unary();
+        return n;
+    }
+
     return parse_primary();
 }
 
@@ -302,8 +372,8 @@ Node *parse_expression(void)
  *
  *   expression ('=' assign_expr)?
  *
- * Only called from parse_var_decl, parse_return, parse_for (step clause),
- * and the expression-statement fallback in parse_statement.
+ * The lhs may be any expression; the codegen enforces that it is an
+ * lvalue (ND_IDENT or ND_DEREF).
  */
 static Node *parse_assign_expr(void)
 {
@@ -321,12 +391,6 @@ static Node *parse_assign_expr(void)
 /* ================================================================== */
 /*  Statement layer — one function per construct                       */
 /* ================================================================== */
-
-/* Predicate: is the current token a type keyword? */
-static int is_type_kw(TokenType t)
-{
-    return t == TK_INT || t == TK_CHAR || t == TK_VOID;
-}
 
 /* ------------------------------------------------------------------ */
 
@@ -359,17 +423,18 @@ static Node *parse_block(void)
  *
  *   var_decl ::= type IDENT ('=' expression)? ';'
  *
- * Returns ND_VAR_DECL.
+ * Returns ND_VAR_DECL.  The node owns the Type*.
  */
 static Node *parse_var_decl(void)
 {
-    Token *type_tok = consume();                      /* int / char / void  */
+    int   line = peek()->line;
+    Type *ty   = parse_type();
     Token *name_tok = expect(TK_IDENT, "variable name");
 
-    Node *n               = node_new(ND_VAR_DECL, type_tok->line);
-    n->var_decl.type_name = strdup(type_tok->value);
-    n->var_decl.name      = strdup(name_tok->value);
-    n->var_decl.init      = match(TK_EQ) ? parse_expression() : NULL;
+    Node *n          = node_new(ND_VAR_DECL, line);
+    n->var_decl.type = ty;
+    n->var_decl.name = strdup(name_tok->value);
+    n->var_decl.init = match(TK_EQ) ? parse_expression() : NULL;
 
     expect(TK_SEMI, "';'");
     return n;
@@ -454,7 +519,7 @@ static Node *parse_while(void)
  *
  *   for_init is one of:
  *     - empty (next token is ';')
- *     - a variable declaration head: type IDENT ('=' expression)?
+ *     - a variable declaration head: type '*'* IDENT ('=' expression)?
  *     - any assignment expression
  *
  * The init, cond, and step clauses are all optional (NULL when absent).
@@ -471,15 +536,15 @@ static Node *parse_for(void)
     if (peek()->type == TK_SEMI) {
         n->for_.init = NULL;                    /* empty init            */
     } else if (is_type_kw(peek()->type)) {
-        /* Variable declaration without trailing semicolon.
-           We handle it inline instead of calling parse_var_decl() so
-           we don't consume the ';' that belongs to the for header. */
-        Token *type_tok = consume();
+        /* Variable declaration (no trailing semicolon — it belongs to
+           the for header, not to the declaration). */
+        int   decl_line = peek()->line;
+        Type *ty        = parse_type();
         Token *name_tok = expect(TK_IDENT, "variable name");
-        Node  *decl               = node_new(ND_VAR_DECL, type_tok->line);
-        decl->var_decl.type_name  = strdup(type_tok->value);
-        decl->var_decl.name       = strdup(name_tok->value);
-        decl->var_decl.init       = match(TK_EQ) ? parse_expression() : NULL;
+        Node  *decl              = node_new(ND_VAR_DECL, decl_line);
+        decl->var_decl.type      = ty;
+        decl->var_decl.name      = strdup(name_tok->value);
+        decl->var_decl.init      = match(TK_EQ) ? parse_expression() : NULL;
         n->for_.init = decl;
     } else {
         n->for_.init = parse_assign_expr();     /* e.g. i = 0           */
@@ -525,8 +590,8 @@ static Node *parse_statement(void)
     case TK_CHAR:
     case TK_VOID:   return parse_var_decl();
     default: {
-        /* Expression statement: any expression (call, assignment, etc.)
-           used for its side effects, followed by a semicolon.         */
+        /* Expression statement: any expression (call, assignment, deref
+           assignment, etc.) used for its side effects.                 */
         Node *e = parse_assign_expr();
         expect(TK_SEMI, "';'");
         return e;
@@ -544,16 +609,18 @@ static Node *parse_statement(void)
  *   function ::= type IDENT '(' params ')' block
  *   params   ::= (type IDENT (',' type IDENT)*)?
  *
+ * type includes pointer stars, e.g.  int *foo(int *p, char **argv)
  * Parameters are represented as ND_VAR_DECL nodes with init = NULL.
  * Returns ND_FUNC.
  */
 static Node *parse_function(void)
 {
-    Token *ret_tok  = consume();              /* return-type keyword    */
+    int   line     = peek()->line;
+    Type *ret_type = parse_type();
     Token *name_tok = expect(TK_IDENT, "function name");
 
-    Node *fn          = node_new(ND_FUNC, ret_tok->line);
-    fn->func.ret_type = strdup(ret_tok->value);
+    Node *fn          = node_new(ND_FUNC, line);
+    fn->func.ret_type = ret_type;
     fn->func.name     = strdup(name_tok->value);
     fn->func.params   = NULL;
 
@@ -564,13 +631,14 @@ static Node *parse_function(void)
             if (!is_type_kw(peek()->type))
                 dief("expected parameter type on line %d", peek()->line);
 
-            Token *pty  = consume();
+            int   pline = peek()->line;
+            Type *pty   = parse_type();
             Token *pnam = expect(TK_IDENT, "parameter name");
 
-            Node *param               = node_new(ND_VAR_DECL, pty->line);
-            param->var_decl.type_name = strdup(pty->value);
-            param->var_decl.name      = strdup(pnam->value);
-            param->var_decl.init      = NULL;  /* params have no initialisers */
+            Node *param          = node_new(ND_VAR_DECL, pline);
+            param->var_decl.type = pty;
+            param->var_decl.name = strdup(pnam->value);
+            param->var_decl.init = NULL;  /* params have no initialisers */
 
             fn->func.params = node_list_append(fn->func.params, param);
         } while (match(TK_COMMA));

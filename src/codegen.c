@@ -2,8 +2,8 @@
  * codegen.c — x86-64 AT&T-syntax code generator.
  *
  * Calling convention: System V AMD64 ABI.
- *   Integer args (in order): %rdi %rsi %rdx %rcx %r8 %r9
- *   Return value:             %rax
+ *   Integer/pointer args (in order): %rdi %rsi %rdx %rcx %r8 %r9
+ *   Return value:                    %rax
  *   Caller-saved: %rax %rcx %rdx %rsi %rdi %r8-%r11
  *   Callee-saved: %rbx %rbp %r12-%r15
  *
@@ -13,7 +13,7 @@
  *   return address        ← pushed by call instruction
  *   saved %rbp            ← pushed by prologue (pushq %rbp)
  *   %rbp points here  ─┐
- *   param 1  -8(%rbp)  │  spilled from %rdi
+ *   param 1  -8(%rbp)  │  spilled from %rdi (int or pointer — both 8 bytes)
  *   param 2 -16(%rbp)  │  spilled from %rsi …
  *   local 1 -N(%rbp)   │  assigned by symtable_define()
  *   …                  │
@@ -22,6 +22,13 @@
  *
  * Expression results are left in %rax.  Binary operators save the LHS
  * on the stack (pushq/popq) so both sides can be live simultaneously.
+ *
+ * Pointer support:
+ *   ND_ADDR  (&x)  — emits leaq offset(%rbp), %rax for stack variables.
+ *   ND_DEREF (*p) as rvalue — evaluates p into %rax, then movq (%rax), %rax.
+ *   ND_DEREF (*p) as lvalue (assign target) — evaluates pointer into %rcx,
+ *                   evaluates rhs into %rax, then movq %rax, (%rcx).
+ *   Pointer arithmetic (ptr +/- n) — scales n by sizeof(*ptr) before add/sub.
  */
 
 #include "codegen.h"
@@ -84,6 +91,8 @@ static void collect_strings(Node *n)
     case ND_BINOP:    collect_strings(n->binop.lhs);
                       collect_strings(n->binop.rhs);                        break;
     case ND_UNARY:    collect_strings(n->unary.operand);                    break;
+    case ND_ADDR:     collect_strings(n->addr.operand);                     break;
+    case ND_DEREF:    collect_strings(n->deref.operand);                    break;
     case ND_CALL:     for (NodeList *l = n->call.args; l; l = l->next)
                           collect_strings(l->node);                          break;
     default:          break;
@@ -111,7 +120,7 @@ static void fprint_asm_string(FILE *out, const char *s)
         case '\r': fputs("\\r",  out); break;
         default:
             if (c < 0x20 || c == 0x7f)
-                fprintf(out, "\\%03o", c);   /* octal escape for other controls */
+                fprintf(out, "\\%03o", c);
             else
                 fputc(c, out);
             break;
@@ -180,12 +189,10 @@ static void emit_call(Codegen *cg, Node *n)
 {
     /*
      * Evaluate each argument left-to-right, placing results into the
-     * SysV integer argument registers.  This is correct for simple
-     * arguments; complex arguments that themselves contain calls would
-     * clobber earlier registers — a known limitation of this simple
-     * linear allocation strategy.
+     * SysV integer argument registers.  Both integer and pointer arguments
+     * are 64-bit values passed in these registers.
      */
-    int   argc = 0;
+    int argc = 0;
     for (NodeList *l = n->call.args; l; l = l->next)
         argc++;
     if (argc > MAX_REG_ARGS) {
@@ -232,7 +239,7 @@ static void emit_expr(Codegen *cg, Node *n)
 
     /* ── String literal — address of pre-collected .rodata label ── */
     case ND_STR_LIT: {
-        int id = register_string(n->str_lit.value);  /* always deduplicates */
+        int id = register_string(n->str_lit.value);
         EMIT(cg, "leaq .Lstr%d(%%rip), %%rax", id);
         break;
     }
@@ -245,12 +252,49 @@ static void emit_expr(Codegen *cg, Node *n)
         break;
     }
 
-    /* ── Assignment — evaluate RHS, store to lvalue's stack slot ─ */
+    /* ── Address-of: &x → leaq offset(%rbp), %rax ────────────── */
+    case ND_ADDR: {
+        Node *operand = n->addr.operand;
+        if (operand->kind != ND_IDENT)
+            dief("line %d: '&' requires a simple variable lvalue", n->line);
+        Symbol *sym = symtable_lookup(cg->st, operand->ident.name);
+        if (!sym) dief("codegen: undefined variable '%s'", operand->ident.name);
+        EMIT(cg, "leaq %d(%%rbp), %%rax", sym->stack_offset);
+        break;
+    }
+
+    /* ── Dereference as rvalue: *p → load through pointer ─────── */
+    case ND_DEREF:
+        emit_expr(cg, n->deref.operand);   /* rax = pointer address */
+        EMIT(cg, "movq (%%rax), %%rax");   /* rax = *pointer        */
+        break;
+
+    /* ── Assignment ───────────────────────────────────────────── */
     case ND_ASSIGN: {
-        emit_expr(cg, n->assign.rhs);
-        Symbol *sym = symtable_lookup(cg->st, n->assign.lhs->ident.name);
-        if (!sym) dief("codegen: undefined variable '%s'", n->assign.lhs->ident.name);
-        EMIT(cg, "movq %%rax, %d(%%rbp)", sym->stack_offset);
+        if (n->assign.lhs->kind == ND_DEREF) {
+            /*
+             * *p = expr:
+             *   1. Evaluate the pointer (p) → push onto stack.
+             *   2. Evaluate the rhs → %rax.
+             *   3. Pop pointer into %rcx.
+             *   4. Store %rax through the pointer.
+             * %rax still holds the stored value (correct for chaining).
+             */
+            emit_expr(cg, n->assign.lhs->deref.operand);
+            EMIT(cg, "pushq %%rax");
+            cg->push_depth++;
+            emit_expr(cg, n->assign.rhs);
+            EMIT(cg, "popq %%rcx");
+            cg->push_depth--;
+            EMIT(cg, "movq %%rax, (%%rcx)");
+        } else {
+            /* Normal variable assignment: rhs → %rax → stack slot. */
+            emit_expr(cg, n->assign.rhs);
+            Symbol *sym = symtable_lookup(cg->st, n->assign.lhs->ident.name);
+            if (!sym) dief("codegen: undefined variable '%s'",
+                           n->assign.lhs->ident.name);
+            EMIT(cg, "movq %%rax, %d(%%rbp)", sym->stack_offset);
+        }
         /* %rax still holds the assigned value — correct for chained assignment */
         break;
     }
@@ -262,6 +306,11 @@ static void emit_expr(Codegen *cg, Node *n)
          * Evaluate RHS → %rax.
          * Move RHS to %rcx; pop LHS back to %rax.
          * Operate: %rax = LHS op RHS.
+         *
+         * For pointer arithmetic (ptr + n  or  ptr - n):
+         *   If LHS is a pointer variable, scale %rcx (the integer offset)
+         *   by sizeof(*ptr) before the add/sub so that p+1 advances by
+         *   the size of the pointed-at type, not by 1 byte.
          */
         emit_expr(cg, n->binop.lhs);
         EMIT(cg, "pushq %%rax");
@@ -272,8 +321,23 @@ static void emit_expr(Codegen *cg, Node *n)
         cg->push_depth--;
 
         const char *op = n->binop.op;
-        if      (!strcmp(op, "+"))  EMIT(cg, "addq %%rcx, %%rax");
-        else if (!strcmp(op, "-"))  EMIT(cg, "subq %%rcx, %%rax");
+
+        if (!strcmp(op, "+") || !strcmp(op, "-")) {
+            /* Check if LHS is a pointer variable; scale offset if so. */
+            int scale = 1;
+            if (n->binop.lhs->kind == ND_IDENT) {
+                Symbol *sym = symtable_lookup(cg->st, n->binop.lhs->ident.name);
+                if (sym && sym->type && sym->type->kind == TYPE_POINTER)
+                    scale = type_sizeof(sym->type->base);
+            }
+            if (scale > 1)
+                EMIT(cg, "imulq $%d, %%rcx", scale);
+
+            if (!strcmp(op, "+"))
+                EMIT(cg, "addq %%rcx, %%rax");
+            else
+                EMIT(cg, "subq %%rcx, %%rax");
+        }
         else if (!strcmp(op, "*"))  EMIT(cg, "imulq %%rcx, %%rax");
         else if (!strcmp(op, "/"))  { EMIT(cg, "cqto"); EMIT(cg, "idivq %%rcx"); }
         else if (!strcmp(op, "%"))  { EMIT(cg, "cqto"); EMIT(cg, "idivq %%rcx"); EMIT(cg, "movq %%rdx, %%rax"); }
@@ -331,8 +395,7 @@ static void emit_stmt(Codegen *cg, Node *n)
 
     /*
      * Block — push a new scope, emit children in declaration order,
-     * then pop the scope.  A later statement can see an earlier
-     * declaration; earlier statements cannot see later ones.
+     * then pop the scope.
      */
     case ND_BLOCK:
         symtable_enter_scope(cg->st);
@@ -342,13 +405,13 @@ static void emit_stmt(Codegen *cg, Node *n)
         break;
 
     /*
-     * Variable declaration — claim the next stack slot (symtable_define
-     * decrements cg->st->stack_offset by 8).  If there is an initialiser,
-     * evaluate it and store the result into the new slot.
+     * Variable declaration — claim the next stack slot.  If there is an
+     * initialiser, evaluate it and store into the new slot.
+     * type_copy() hands the symtable its own copy; the AST retains its.
      */
     case ND_VAR_DECL: {
         Symbol *sym = symtable_define(cg->st, n->var_decl.name,
-                                              n->var_decl.type_name);
+                                              type_copy(n->var_decl.type));
         if (n->var_decl.init) {
             emit_expr(cg, n->var_decl.init);
             EMIT(cg, "movq %%rax, %d(%%rbp)", sym->stack_offset);
@@ -359,7 +422,7 @@ static void emit_stmt(Codegen *cg, Node *n)
     /* return expr? — restore the frame and return to caller. */
     case ND_RETURN:
         if (n->ret.expr) emit_expr(cg, n->ret.expr);
-        EMIT(cg, "leave");   /* movq %rbp,%rsp  ;  popq %rbp */
+        EMIT(cg, "leave");
         EMIT(cg, "ret");
         break;
 
@@ -397,19 +460,18 @@ static void emit_stmt(Codegen *cg, Node *n)
      *
      * A dedicated for-header scope lets  int i = 0  in the init clause
      * be visible through the whole loop but invisible after it.
-     * The body's ND_BLOCK opens an inner scope on top of this one.
      */
     case ND_FOR: {
         int loop_lbl = new_label(cg);
         int end_lbl  = new_label(cg);
 
-        symtable_enter_scope(cg->st);   /* for-header scope */
+        symtable_enter_scope(cg->st);
 
         if (n->for_.init) {
             if (n->for_.init->kind == ND_VAR_DECL)
-                emit_stmt(cg, n->for_.init);   /* defines into for-scope */
+                emit_stmt(cg, n->for_.init);
             else
-                emit_expr(cg, n->for_.init);   /* plain expression       */
+                emit_expr(cg, n->for_.init);
         }
 
         LABEL(cg, loop_lbl);
@@ -418,21 +480,23 @@ static void emit_stmt(Codegen *cg, Node *n)
             EMIT(cg, "testq %%rax, %%rax");
             EMIT(cg, "je .L%d", end_lbl);
         }
-        emit_stmt(cg, n->for_.body);           /* body opens its own scope */
+        emit_stmt(cg, n->for_.body);
         if (n->for_.step) emit_expr(cg, n->for_.step);
         EMIT(cg, "jmp .L%d", loop_lbl);
         LABEL(cg, end_lbl);
 
-        symtable_exit_scope(cg->st);    /* close for-header scope */
+        symtable_exit_scope(cg->st);
         break;
     }
 
-    /* Expression used as a statement — evaluate for side effects. */
+    /* Expressions used as statements — evaluate for side effects. */
     case ND_CALL:
     case ND_ASSIGN:
     case ND_BINOP:
     case ND_UNARY:
     case ND_IDENT:
+    case ND_ADDR:
+    case ND_DEREF:
         emit_expr(cg, n);
         break;
 
@@ -455,8 +519,8 @@ static void emit_func(Codegen *cg, Node *fn)
      * Count every stack slot this function will need:
      *   params  — spilled from argument registers on entry
      *   locals  — all ND_VAR_DECL nodes anywhere in the body
-     * Multiply by 8 bytes per slot and round up to 16-byte ABI boundary
-     * so %rsp is always 16-byte aligned before any call instruction.
+     * Both int and pointer parameters occupy one 8-byte slot.
+     * Multiply by 8 bytes per slot and round up to 16-byte boundary.
      */
     int param_count = 0;
     for (NodeList *l = fn->func.params; l; l = l->next)
@@ -476,24 +540,25 @@ static void emit_func(Codegen *cg, Node *fn)
     /*
      * Parameter scope: define each param in the symbol table (which
      * assigns its stack slot) then spill its register value there.
-     * The body's ND_BLOCK will open a nested inner scope on top of this.
+     * Pointers and integers are both passed in the same integer registers
+     * and stored with movq — they're both 8-byte values.
      */
     symtable_enter_scope(cg->st);
     int pi = 0;
     for (NodeList *l = fn->func.params; l && pi < MAX_REG_ARGS; l = l->next, pi++) {
         Node   *p   = l->node;
         Symbol *sym = symtable_define(cg->st, p->var_decl.name,
-                                              p->var_decl.type_name);
+                                              type_copy(p->var_decl.type));
         EMIT(cg, "movq %s, %d(%%rbp)", arg_regs[pi], sym->stack_offset);
     }
 
     emit_stmt(cg, fn->func.body);
 
-    symtable_exit_scope(cg->st);   /* close parameter scope */
+    symtable_exit_scope(cg->st);
 
     /* ── Implicit return 0 (fall-off-end) ────────────────────── */
     EMIT(cg, "xorl %%eax, %%eax");
-    EMIT(cg, "leave");   /* movq %rbp,%rsp  ;  popq %rbp */
+    EMIT(cg, "leave");
     EMIT(cg, "ret");
     fprintf(cg->out, ".size %s, .-%s\n\n", fn->func.name, fn->func.name);
 }
@@ -513,29 +578,18 @@ void codegen_emit(Codegen *cg, Node *root)
 {
     if (root->kind != ND_PROGRAM) die("codegen_emit: expected ND_PROGRAM");
 
-    /* Reset string table for this compilation run. */
     str_count = 0;
 
-    /* Pre-scan: register all string literals before emitting any code. */
     collect_strings(root);
 
-    /* .rodata section (possibly empty) then .text section. */
     emit_rodata_section(cg->out);
     fprintf(cg->out, ".text\n");
 
     for (NodeList *l = root->program.funcs; l; l = l->next)
         emit_func(cg, l->node);
 
-    /* Mark stack non-executable (required on hardened Linux systems). */
     fprintf(cg->out, ".section .note.GNU-stack,\"\",@progbits\n");
 }
-
-/*
- * Standalone wrappers — emit a single node using a caller-supplied
- * SymTable.  Useful for unit-testing individual codegen paths.
- * These do NOT emit the .rodata section; callers that use string
- * literals must arrange that separately.
- */
 
 void codegen_expr(Node *node, SymTable *st, FILE *out)
 {
@@ -577,7 +631,7 @@ void codegen_function(Node *node, FILE *out)
 {
     if (!node || !out || node->kind != ND_FUNC) return;
     Codegen cg;
-    codegen_init(&cg, out);   /* allocates a fresh SymTable */
+    codegen_init(&cg, out);
     emit_func(&cg, node);
 }
 

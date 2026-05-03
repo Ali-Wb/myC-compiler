@@ -84,6 +84,16 @@ static void resolve_expr(Node *expr, SymTable *st)
         resolve_expr(expr->unary.operand, st);
         break;
 
+    /* Address-of: resolve the operand (must be an lvalue, checked in codegen). */
+    case ND_ADDR:
+        resolve_expr(expr->addr.operand, st);
+        break;
+
+    /* Dereference: resolve the pointer expression. */
+    case ND_DEREF:
+        resolve_expr(expr->deref.operand, st);
+        break;
+
     /* Function call: resolve each argument.
        We do not check whether the callee itself is defined — that
        requires a global function table and is left for a later pass. */
@@ -130,7 +140,7 @@ static void resolve_stmt(Node *stmt, SymTable *st)
     case ND_VAR_DECL:
         if (stmt->var_decl.init)
             resolve_expr(stmt->var_decl.init, st);
-        if (!symtable_define(st, stmt->var_decl.name, stmt->var_decl.type_name)) {
+        if (!symtable_define(st, stmt->var_decl.name, type_copy(stmt->var_decl.type))) {
             fprintf(stderr, "error: line %d: '%s' already declared in this scope\n",
                     stmt->line, stmt->var_decl.name);
             exit(1);
@@ -227,7 +237,7 @@ void resolve(Node *program, SymTable *st)
         for (NodeList *pl = fn->func.params; pl; pl = pl->next) {
             Node *param = pl->node;  /* each param is an ND_VAR_DECL */
             if (!symtable_define(st, param->var_decl.name,
-                                     param->var_decl.type_name)) {
+                                     type_copy(param->var_decl.type))) {
                 fprintf(stderr, "error: line %d: '%s' already declared in this scope (parameter in function '%s')\n",
                         param->line, param->var_decl.name, fn->func.name);
                 exit(1);

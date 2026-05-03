@@ -30,7 +30,7 @@
 
 typedef struct {
     char *name;          /* heap-allocated copy of the variable name   */
-    char *type;          /* heap-allocated copy of the type spelling    */
+    Type *type;          /* owned copy of the declared type            */
     int   stack_offset;  /* negative offset from %rbp, e.g. -8, -16   */
 } Symbol;
 
@@ -79,8 +79,11 @@ void      symtable_exit_scope(SymTable *st);
  * Returns a pointer to the new Symbol on success.
  * Returns NULL if `name` is already defined in the CURRENT scope
  * (the caller should treat this as a "declared twice" error).
+ *
+ * The symbol table takes ownership of `type`; the caller must pass a
+ * freshly allocated Type (e.g. via type_copy()) and must not free it.
  */
-Symbol   *symtable_define(SymTable *st, const char *name, const char *type);
+Symbol   *symtable_define(SymTable *st, const char *name, Type *type);
 
 /*
  * Look up `name` starting from the current scope and walking outward.
